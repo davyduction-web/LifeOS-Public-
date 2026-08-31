@@ -492,25 +492,78 @@ function growthScore(d){
   if(d.meditation && (d.meditation.sessions||[]).length > 0) c++;
   return Math.round((c/(GROWTH_ITEMS.length+2))*100);
 }
-function musicScoreComponents(d){
-  const sessions=(d.music&&d.music.sessions)||[];
-  const distinctProjects=new Set(sessions.map(s=>s.workedOn).filter(w=>w&&w!=='')).size;
-  const totalMinutes=sessions.reduce((a,s)=>a+(s.minutes||0),0);
-  const ratedSessions=sessions.filter(s=>s.quality!=null);
-  const avgQuality=ratedSessions.length?ratedSessions.reduce((a,s)=>a+s.quality,0)/ratedSessions.length:0;
-  return {projectPts:Math.min(distinctProjects/4,1)*40,minutePts:Math.min(totalMinutes/90,1)*40,qualityPts:(avgQuality/5)*20};
+/* ── Work scoring — replaces old project-diversity / session-minutes / quality formula ── */
+const SESSIONS_JOBS=['dj','videoDirector','graphicDesigner','student','trader'];
+const WORK_TARGET={dj:10,videoDirector:10,graphicDesigner:10}; // all others default 20
+const WORK_REP_KEYS={
+  dj:['djGig'],
+  videoDirector:['videoRevision','videoDelivery'],
+  trader:['traderTrade','traderCustomerLog'],
+  bankEmployee:['bankInteraction','bankComplaint'],
+  shopWorker:['shopSale','shopRepairLog'],
+  publicEmployee:['piCase','piApplication','piInquiry'],
+  accountant:['acClientWork','acInvoice'],
+  officeWorker:['owMeeting','owTaskDone'],
+  student:['stuClass','stuExam'],
+  businessOwner:['boFeedback','boMarketing'],
+  graphicDesigner:['gdRevision','gdBrief'],
+  pharmacist:['rxFill','rxConsult'],
+};
+const WORK_ONETIME_KEYS={
+  dj:['djSetSeconds','djPracticeSeconds','djNewTracks','djEquipmentCheck','djMixPublished','djBookingInquiry'],
+  videoDirector:['videoShootSeconds','videoEditSeconds','videoFootageBackedUp','videoEditStage'],
+  trader:['traderSessionSeconds','traderInventory','traderSalesTotal','traderDebtCredit'],
+  bankEmployee:['bankTrainingDone','bankReconciliationDone','bankMeetingAttended','bankTransactionVol','bankTargetProgress'],
+  shopWorker:['shopWarrantyClaim','shopNewStockReceived','shopPriceCheck','shopDemoGiven','shopCashReconciled','shopSupplierOrder','shopCustomerInquiry'],
+  publicEmployee:['piComplianceCheck','piMeetingAttended','piReportSubmitted','piTrainingDone','piEscalationMade','piBacklogCleared'],
+  accountant:['acReconciliationDone','acReportGenerated','acDiscrepancyFound','acClientMeeting','acComplianceCheck'],
+  officeWorker:['owEmailCleared','owReportProduced','owCollabTask','owPresentationGiven','owOvertime','owFocusSeconds'],
+  student:['stuStudySeconds','stuAssignment','stuGradeReceived','stuGroupStudy','stuReadingPages','stuNotePages'],
+  businessOwner:['boSupplierOrder','ownerRevenue','ownerExpense','boInventory','ownerClientAcquired'],
+  graphicDesigner:['gdFileDelivered','gdMoodBoard','gdPortfolio','gdDesignSeconds','gdClientFeedback'],
+  pharmacist:['rxOutOfStock','rxExpiryCheck','rxSupplierOrder','rxDrugInteraction','rxInsuranceClaim','rxContinuingEd','rxInventory'],
+};
+function _workOTV(w,k){ // one-time value: 1 if field has meaningful data
+  const v=w[k];
+  if(v===undefined||v===null||v===''||v===false) return 0;
+  if(v===true) return 1;
+  if(typeof v==='number') return v>0?1:0;
+  return 1;
+}
+function musicScoreBreakdown(d){
+  const job=(DB.profile()||{}).job||null;
+  if(!job||job==='custom') return {repPts:0,otPts:0,ciPts:0,total:0,target:20};
+  const w=(d&&d.music)||{};
+  const repLogs=w.repLogs||{};
+  const target=WORK_TARGET[job]||20;
+  let repCount=0;
+  (WORK_REP_KEYS[job]||[]).forEach(k=>{repCount+=(repLogs[k]||[]).length;});
+  if(SESSIONS_JOBS.includes(job)) repCount+=(w.sessions||[]).length;
+  let otCount=0;
+  (WORK_ONETIME_KEYS[job]||[]).forEach(k=>{otCount+=_workOTV(w,k);});
+  const ciPts=(w.checkinSeconds||0)>=900?1:0;
+  const total=repCount+otCount+ciPts;
+  return {repPts:repCount,otPts:otCount,ciPts,total,target};
 }
 function musicScore(d){
-  if(!(d.music&&d.music.sessions&&d.music.sessions.length)) return 0;
-  const c=musicScoreComponents(d);
-  return Math.round(c.projectPts+c.minutePts+c.qualityPts);
+  if(!(d&&d.music)) return 0;
+  const {total,target}=musicScoreBreakdown(d);
+  return Math.min(100,Math.round(total/target*100));
 }
 function financeScore(d, dateStr){
   if(!_txCountMap) _buildTxMap();
   return Math.min((_txCountMap[dateStr||'']||0)*10, 100);
 }
+function planningBonus(dateStr){
+  const todos=DB.todos();
+  const planned=todos.filter(t=>t.forDate===dateStr&&!t.dismissed).length;
+  if(planned===0) return 0;
+  const completed=todos.filter(t=>t.forDate===dateStr&&t.done&&!t.dismissed).length;
+  return Math.min(5,(completed/planned)*5);
+}
 function dayScore(d, dateStr){
-  return Math.round((faithScore(d)+healthScore(d)+musicScore(d)+financeScore(d,dateStr)+growthScore(d))/5);
+  const catAvg=(faithScore(d)+healthScore(d)+musicScore(d)+financeScore(d,dateStr)+growthScore(d))/5;
+  return Math.round(catAvg+planningBonus(dateStr));
 }
 function monthAvg(scoreFn, monthPrefix, cachedAll){
   const all = cachedAll || DB.allDays();
@@ -1669,7 +1722,7 @@ function openDayDetail(dateStr){
     return;
   }
   const sc = dayScore(rec, dateStr);
-  let html = '<div class="modal-title">'+label+' &middot; '+sc+'/100</div>';
+  let html = '<div class="modal-title">'+label+' &middot; '+sc+'</div>';
 
   html += '<div style="font-family:var(--mono);font-size:9px;color:var(--faith);letter-spacing:1px;margin:4px 0 6px">FAITH</div>';
   const prayerNames = {fajr:'Fajr',dhuhr:'Dhuhr',asr:'Asr',maghrib:'Maghrib',isha:'Isha'};
@@ -4843,6 +4896,8 @@ function wireWorkTimerPicker(s,id,picker,dataKey){
 }
 function workExtrasHtml(job, w){
   let h='';
+  const _repLogs=w.repLogs||{};
+  const _target=WORK_TARGET[job]||20;
   const _inp=(label,field,type,placeholder,val,extra)=>{
     const v=val!=null?val:'';
     return '<label style="font-family:var(--mono);font-size:9px;color:var(--mute);display:block;margin-top:8px">'+label+'</label>'
@@ -4855,160 +4910,172 @@ function workExtrasHtml(job, w){
     opts.forEach(o=>{ s+='<option value="'+o+'"'+(val===o?' selected':'')+'>'+o+'</option>'; });
     return s+'</select>';
   };
+  const _repLog=(label,key,notePlh)=>{
+    const entries=_repLogs[key]||[];
+    let r='<label style="font-family:var(--mono);font-size:9px;color:var(--mute);display:block;margin-top:10px">'+label+'</label>';
+    if(entries.length){
+      r+='<div style="margin:4px 0 2px">';
+      entries.forEach((e,i)=>{
+        r+='<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--sep-alt)">'
+          +'<span style="font-size:11px;color:'+(e.note?'var(--text)':'var(--mute)')+'">'+escHtml(e.note||'logged')+'</span>'
+          +'<button data-del-rep-key="'+key+'" data-del-rep-idx="'+i+'" style="background:none;border:none;color:var(--mute);font-size:18px;cursor:pointer;padding:0 4px;line-height:1" aria-label="Remove">×</button>'
+          +'</div>';
+      });
+      r+='</div>';
+    }
+    r+='<div style="display:flex;gap:6px;margin-top:4px">'
+      +'<input type="text" class="input rep-note-input" data-rep-key="'+key+'" placeholder="'+escHtml(notePlh||'Note (optional)')+'" style="flex:1;margin-bottom:0">'
+      +'<button class="btn-ghost rep-log-btn" data-rep-key="'+key+'" style="white-space:nowrap;padding:8px 10px;font-size:12px;flex-shrink:0">+ Log</button>'
+      +'</div>'
+      +'<div style="font-family:var(--mono);font-size:9px;color:var(--music);margin-top:3px;margin-bottom:4px">'+entries.length+'/'+_target+' today</div>';
+    return r;
+  };
 
   if(job==='dj'){
-    h+=_inp('GIG VENUE / EVENT','djGigVenue','text','Club name or event',w.djGigVenue);
-    h+=_sel('GIG TYPE','djGigType',['Club','Wedding','Festival','Private'],w.djGigType);
+    h+=_repLog('GIG LOGGED','djGig','Venue / event name (optional)');
     h+=workTimerRowHtml2('work-t1',workPicker1,w.djSetSeconds||0,'Set Length','djSetSeconds');
+    h+=workTimerRowHtml2('work-t2',workPicker2,w.djPracticeSeconds||0,'Practice Mixing Session','djPracticeSeconds');
     h+=_inp('GENRE / STYLE','djGenre','text','e.g. Afrobeats, House',w.djGenre);
     h+=_inp('NEW TRACKS ADDED TO LIBRARY','djNewTracks','number','Count',w.djNewTracks,'min="0"');
-    h+=workTimerRowHtml2('work-t2',workPicker2,w.djPracticeSeconds||0,'Practice Mixing Session','djPracticeSeconds');
     h+=yesNoRow('djEquipmentCheck','Equipment Check / Maintenance',w.djEquipmentCheck);
-    h+=_inp('CROWD SIZE / TURNOUT','djCrowdSize','number','Estimate',w.djCrowdSize,'min="0"');
-    h+=_inp('FEE EARNED (OPTIONAL)','djFeeEarned','number','Amount',w.djFeeEarned,'min="0"');
     h+=yesNoRow('djMixPublished','Mix Published (SoundCloud / Mixcloud / YouTube)',w.djMixPublished);
     h+=yesNoRow('djBookingInquiry','Booking Inquiry Received',w.djBookingInquiry);
+    h+=_inp('CROWD SIZE / TURNOUT','djCrowdSize','number','Estimate',w.djCrowdSize,'min="0"');
+    h+=_inp('FEE EARNED (OPTIONAL)','djFeeEarned','number','Amount',w.djFeeEarned,'min="0"');
 
   } else if(job==='videoDirector'){
+    h+=_repLog('CLIENT REVISION ROUND LOGGED','videoRevision','Round # / client note (optional)');
+    h+=_repLog('DELIVERY / EXPORT LOGGED','videoDelivery','Format / file note (optional)');
     h+=_sel('PROJECT TYPE','videoProjectType',['Music video','Wedding film','Commercial','Documentary','Short film'],w.videoProjectType);
     h+=workTimerRowHtml2('work-t1',workPicker1,w.videoShootSeconds||0,'Hours on Set (Shooting)','videoShootSeconds');
-    h+=_inp('CREW SIZE','videoCrewSize','number','Number of crew',w.videoCrewSize,'min="0"');
     h+=_sel('EDIT STAGE','videoEditStage',['Rough cut','Color grade','Sound mix','Final export'],w.videoEditStage);
     h+=workTimerRowHtml2('work-t2',workPicker2,w.videoEditSeconds||0,'Active Editing Time','videoEditSeconds');
     h+=yesNoRow('videoFootageBackedUp','Footage Backed Up',w.videoFootageBackedUp);
-    h+=_inp('CLIENT REVISION ROUND #','videoClientRevision','number','Round number',w.videoClientRevision,'min="1"');
-    h+=yesNoRow('videoDelivered','Delivery / Final Export Completed',w.videoDelivered);
+    h+=_inp('CREW SIZE','videoCrewSize','number','Number of crew',w.videoCrewSize,'min="0"');
     h+=_inp('EQUIPMENT USED','videoEquipment','text','Camera, drone, gimbal…',w.videoEquipment);
     h+=_inp('STORAGE USED (GB)','videoStorageGB','number','GB of footage',w.videoStorageGB,'min="0"');
     h+=_inp('SOFTWARE USED','videoSoftware','text','Premiere, DaVinci, After Effects…',w.videoSoftware);
     h+=_inp('CLIENT / BRAND NAME','videoClientName','text','Client name',w.videoClientName);
 
   } else if(job==='trader'){
-    h+=_inp('ITEM / PRODUCT TRADED','traderItemTraded','text','What you traded',w.traderItemTraded);
-    h+=_inp('BUY PRICE','traderBuyPrice','number','Amount paid',w.traderBuyPrice,'min="0"');
-    h+=_inp('SELL PRICE','traderSellPrice','number','Amount received',w.traderSellPrice,'min="0"');
-    if(w.traderBuyPrice!=null&&w.traderSellPrice!=null){
-      const pl=(parseFloat(w.traderSellPrice)||0)-(parseFloat(w.traderBuyPrice)||0);
-      const plColor=pl>=0?'var(--green)':'var(--red)';
-      h+='<div style="font-family:var(--mono);font-size:11px;color:'+plColor+';margin-top:4px;margin-bottom:4px">P/L: '+(pl>=0?'+':'')+pl.toFixed(2)+'</div>';
-    }
+    h+=_repLog('TRADE LOGGED','traderTrade','Item + buy/sell price (optional)');
+    h+=_repLog('CUSTOMER / BUYER LOGGED','traderCustomerLog','Who you sold to (optional)');
+    h+=workTimerRowHtml2('work-t1',workPicker1,w.traderSessionSeconds||0,'Trading Session Timer','traderSessionSeconds');
     h+=_inp('MARKET / LOCATION','traderMarket','text','Which market or online',w.traderMarket);
     h+=_inp('INVENTORY COUNT (STOCK ON HAND)','traderInventory','number','Units',w.traderInventory,'min="0"');
     h+=_inp('SUPPLIER','traderSupplier','text','Bought from',w.traderSupplier);
-    h+=_inp('CUSTOMER / BUYER','traderCustomer','text','Sold to',w.traderCustomer);
-    h+=workTimerRowHtml2('work-t1',workPicker1,w.traderSessionSeconds||0,'Trading Session Timer','traderSessionSeconds');
     h+=_inp('DEBT / CREDIT (NOTES)','traderDebtCredit','text','Money owed to/by you',w.traderDebtCredit);
     h+=_inp('DAILY SALES TOTAL','traderSalesTotal','number','Running sum today',w.traderSalesTotal,'min="0"');
 
   } else if(job==='bankEmployee'){
+    h+=_repLog('CUSTOMER INTERACTION','bankInteraction','Quick note (optional)');
+    h+=_repLog('COMPLAINT / ESCALATION HANDLED','bankComplaint','Issue note (optional)');
     h+=_sel('DEPARTMENT / ROLE','bankDepartment',['Teller','Loans','Customer service','Operations'],w.bankDepartment);
-    h+=_inp('CUSTOMER INTERACTIONS HANDLED','bankCustomerCount','number','Count',w.bankCustomerCount,'min="0"');
     h+=_inp('TRANSACTION VOLUME PROCESSED','bankTransactionVol','number','Count or amount',w.bankTransactionVol,'min="0"');
     h+=_inp('TARGET / QUOTA PROGRESS (%)','bankTargetProgress','number','0–100',w.bankTargetProgress,'min="0" max="100"');
     h+=yesNoRow('bankTrainingDone','Training / Certification Completed',w.bankTrainingDone);
-    h+=_inp('SHIFT TYPE / BRANCH','bankShiftType','text','e.g. Morning, Branch A',w.bankShiftType);
     h+=yesNoRow('bankReconciliationDone','Cash Balancing / Reconciliation Done',w.bankReconciliationDone);
-    h+=yesNoRow('bankComplaintHandled','Complaint or Escalation Handled',w.bankComplaintHandled);
     h+=yesNoRow('bankMeetingAttended','Meeting Attended',w.bankMeetingAttended);
+    h+=_inp('SHIFT TYPE / BRANCH','bankShiftType','text','e.g. Morning, Branch A',w.bankShiftType);
     h+=_inp('PERFORMANCE REVIEW NOTE','bankPerformanceNote','text','Quick self-note',w.bankPerformanceNote);
 
   } else if(job==='shopWorker'){
-    h+=_inp('ITEM SOLD','shopSaleItem','text','What was sold',w.shopSaleItem);
-    h+=_inp('SALE PRICE','shopSalePrice','number','Amount',w.shopSalePrice,'min="0"');
-    h+=_inp('REPAIR JOB — DEVICE TYPE','shopRepairDevice','text','e.g. Phone, Laptop',w.shopRepairDevice);
-    h+=_sel('REPAIR STATUS','shopRepairStatus',['In progress','Done'],w.shopRepairStatus);
+    h+=_repLog('SALE LOGGED','shopSale','Item sold / price (optional)');
+    h+=_repLog('REPAIR JOB LOGGED','shopRepairLog','Device type / issue (optional)');
     h+=_inp('STOCK / INVENTORY COUNT','shopInventoryCount','number','Items in stock',w.shopInventoryCount,'min="0"');
+    h+=_inp('CUSTOMER INQUIRIES (COUNT)','shopCustomerInquiry','number','People asking, not buying',w.shopCustomerInquiry,'min="0"');
     h+=yesNoRow('shopWarrantyClaim','Warranty Claim Handled',w.shopWarrantyClaim);
     h+=yesNoRow('shopNewStockReceived','New Stock Received (Restocking)',w.shopNewStockReceived);
-    h+=_inp('CUSTOMER INQUIRIES (COUNT)','shopCustomerInquiry','number','People asking, not buying',w.shopCustomerInquiry,'min="0"');
     h+=yesNoRow('shopPriceCheck','Price Check / Competitor Research Done',w.shopPriceCheck);
     h+=yesNoRow('shopDemoGiven','Product Demo Given',w.shopDemoGiven);
     h+=yesNoRow('shopCashReconciled','Cash Register Reconciled (End of Day)',w.shopCashReconciled);
     h+=yesNoRow('shopSupplierOrder','Supplier Order Placed',w.shopSupplierOrder);
 
   } else if(job==='publicEmployee'){
-    h+=_inp('CASES / FILES HANDLED','piCasesHandled','number','Count today',w.piCasesHandled,'min="0"');
+    h+=_repLog('CASE / FILE HANDLED','piCase','Case type / note (optional)');
+    h+=_repLog('APPLICATION PROCESSED','piApplication','App type / outcome (optional)');
+    h+=_repLog('PUBLIC INQUIRY HANDLED','piInquiry','Topic / quick note (optional)');
     h+=_inp('DEPARTMENT','piDepartment','text','e.g. Pensions, Member services',w.piDepartment);
-    h+=_inp('APPLICATIONS PROCESSED','piApplicationsProcessed','number','Reviewed or approved',w.piApplicationsProcessed,'min="0"');
-    h+=_inp('PUBLIC INQUIRIES HANDLED','piInquiryHandled','number','Count',w.piInquiryHandled,'min="0"');
+    h+=_inp('BACKLOG CLEARED (COUNT)','piBacklogCleared','number','Pending items worked through',w.piBacklogCleared,'min="0"');
     h+=yesNoRow('piComplianceCheck','Compliance Check Performed',w.piComplianceCheck);
     h+=yesNoRow('piMeetingAttended','Meeting / Briefing Attended',w.piMeetingAttended);
     h+=yesNoRow('piReportSubmitted','Report Submitted',w.piReportSubmitted);
     h+=yesNoRow('piTrainingDone','Training / Policy Update Completed',w.piTrainingDone);
-    h+=_inp('BACKLOG CLEARED (COUNT)','piBacklogCleared','number','Pending items worked through',w.piBacklogCleared,'min="0"');
     h+=yesNoRow('piEscalationMade','Escalation to Supervisor',w.piEscalationMade);
 
   } else if(job==='accountant'){
-    h+=_inp('CLIENT / COMPANY FILE WORKED ON','acClientFile','text','Client or company name',w.acClientFile);
+    h+=_repLog('CLIENT FILE WORKED ON','acClientWork','Client / company name (optional)');
+    h+=_repLog('INVOICE / RECEIPT PROCESSED','acInvoice','Invoice # / amount (optional)');
     h+=_sel('TASK TYPE','acTaskType',['Bookkeeping','Reconciliation','Tax filing','Audit','Payroll'],w.acTaskType);
     h+=yesNoRow('acReconciliationDone','Reconciliation Completed',w.acReconciliationDone);
     h+=yesNoRow('acReportGenerated','Report Generated (Financial / Tax / Budget)',w.acReportGenerated);
-    h+=_inp('DEADLINE NOTE','acDeadlineNote','text','Filing date or client due date',w.acDeadlineNote);
-    h+=_inp('INVOICES / RECEIPTS PROCESSED','acInvoicesProcessed','number','Count',w.acInvoicesProcessed,'min="0"');
     h+=yesNoRow('acDiscrepancyFound','Discrepancy Found',w.acDiscrepancyFound);
     h+=yesNoRow('acClientMeeting','Client Meeting / Consultation',w.acClientMeeting);
-    h+=_inp('SOFTWARE USED','acSoftware','text','QuickBooks, Excel, Sage…',w.acSoftware);
     h+=yesNoRow('acComplianceCheck','Compliance / Audit Check Performed',w.acComplianceCheck);
+    h+=_inp('DEADLINE NOTE','acDeadlineNote','text','Filing date or client due date',w.acDeadlineNote);
+    h+=_inp('SOFTWARE USED','acSoftware','text','QuickBooks, Excel, Sage…',w.acSoftware);
 
   } else if(job==='student'){
-    h+=_inp('SUBJECT / COURSE','stuSubject','text','What you studied',w.stuSubject);
+    h+=_repLog('CLASS ATTENDED','stuClass','Subject / class name (optional)');
+    h+=_repLog('EXAM / ASSIGNMENT DONE','stuExam','Exam name / grade (optional)');
     h+=workTimerRowHtml2('work-t1',workPicker1,w.stuStudySeconds||0,'Study Session','stuStudySeconds');
+    h+=_inp('SUBJECT / COURSE','stuSubject','text','What you studied',w.stuSubject);
     h+=_inp('ASSIGNMENT','stuAssignment','text','Assignment name or description',w.stuAssignment);
     h+=_sel('ASSIGNMENT STATUS','stuAssignmentStatus',['Not started','In progress','Done'],w.stuAssignmentStatus);
-    h+=_inp('EXAM / TEST DATE','stuExamDate','text','e.g. 2026-09-05',w.stuExamDate);
     h+=_inp('GRADE RECEIVED','stuGradeReceived','text','Score or grade',w.stuGradeReceived);
-    h+=yesNoRow('stuClassAttended','Class Attended',w.stuClassAttended);
     h+=_inp('NOTES TAKEN (PAGES)','stuNotePages','number','Page count',w.stuNotePages,'min="0"');
     h+=yesNoRow('stuGroupStudy','Group Study / Project Session',w.stuGroupStudy);
     h+=_inp('READING ASSIGNMENT (PAGES)','stuReadingPages','number','Pages completed',w.stuReadingPages,'min="0"');
     h+=_inp('GPA / OVERALL GOAL','stuGPAGoal','text','Target GPA or grade',w.stuGPAGoal);
 
   } else if(job==='businessOwner'){
+    h+=_repLog('CUSTOMER FEEDBACK RECEIVED','boFeedback','Feedback summary (optional)');
+    h+=_repLog('MARKETING ACTIVITY DONE','boMarketing','Activity type / platform (optional)');
     h+=_inp('BUSINESS TYPE','boBusinessType','text','Retail, food, service, manufacturing…',w.boBusinessType);
     h+=_inp('DAILY REVENUE','ownerRevenue','number','Amount earned today',w.ownerRevenue,'min="0"');
     h+=_inp('DAILY EXPENSE','ownerExpense','number','Amount spent today',w.ownerExpense,'min="0"');
     h+=_inp('STAFF SCHEDULED / MANAGED','boStaff','text','Names or count',w.boStaff);
     h+=yesNoRow('boSupplierOrder','Supplier Order Placed',w.boSupplierOrder);
     h+=_inp('INVENTORY / STOCK LEVEL','boInventory','text','Current stock note',w.boInventory);
-    h+=_inp('CUSTOMER FEEDBACK','boCustomerFeedback','text','Summary of feedback received',w.boCustomerFeedback);
-    h+=yesNoRow('boMarketingDone','Marketing Activity Done (Post / Promo / Ad)',w.boMarketingDone);
+    h+=yesNoRow('ownerClientAcquired','Client / Customer Acquired',w.ownerClientAcquired);
     h+=_inp('BUSINESS GOAL / MILESTONE','ownerGoal','text','What you are tracking',w.ownerGoal);
     h+=_inp('CASH FLOW NOTE','boCashFlowNote','text','Quick note on cash position',w.boCashFlowNote);
 
   } else if(job==='graphicDesigner'){
+    h+=_repLog('REVISION ROUND LOGGED','gdRevision','Client / round # (optional)');
+    h+=_repLog('DESIGN BRIEF RECEIVED','gdBrief','Project name (optional)');
     h+=_sel('PROJECT TYPE','gdProjectType',['Logo','Branding','Social media','Print','UI / Web','Packaging'],w.gdProjectType);
     h+=_inp('CLIENT / BRAND NAME','gdClientName','text','Who you designed for',w.gdClientName);
-    h+=_inp('REVISION ROUND #','gdRevisionRound','number','Round number with client',w.gdRevisionRound,'min="1"');
-    h+=_inp('SOFTWARE USED','gdSoftware','text','Illustrator, Photoshop, Figma, Canva…',w.gdSoftware);
+    h+=workTimerRowHtml2('work-t1',workPicker1,w.gdDesignSeconds||0,'Design Time','gdDesignSeconds');
     h+=yesNoRow('gdFileDelivered','File Delivered (Final Export)',w.gdFileDelivered);
     h+=yesNoRow('gdMoodBoard','Concept / Mood Board Created',w.gdMoodBoard);
-    h+=yesNoRow('gdBriefReceived','Design Brief Received (New Job)',w.gdBriefReceived);
     h+=yesNoRow('gdPortfolio','Portfolio Piece Added',w.gdPortfolio);
-    h+=workTimerRowHtml2('work-t1',workPicker1,w.gdDesignSeconds||0,'Design Time','gdDesignSeconds');
+    h+=_inp('SOFTWARE USED','gdSoftware','text','Illustrator, Photoshop, Figma, Canva…',w.gdSoftware);
     h+=_sel('CLIENT FEEDBACK','gdClientFeedback',['Approved','Requested changes','Rejected'],w.gdClientFeedback);
 
   } else if(job==='pharmacist'){
-    h+=_inp('PRESCRIPTIONS FILLED','rxFilled','number','Count today',w.rxFilled,'min="0"');
-    h+=_inp('PATIENT CONSULTATIONS','rxConsultation','number','Separate from fills',w.rxConsultation,'min="0"');
-    h+=yesNoRow('rxOutOfStock','Medication Out of Stock Flagged',w.rxOutOfStock);
+    h+=_repLog('PRESCRIPTION FILLED','rxFill','Medication / patient note (optional)');
+    h+=_repLog('PATIENT CONSULTATION','rxConsult','Consultation topic (optional)');
     h+=_inp('STOCK / INVENTORY COUNT','rxInventory','number','Items counted',w.rxInventory,'min="0"');
+    h+=_inp('INSURANCE / CLAIMS PROCESSED','rxInsuranceClaim','number','Count',w.rxInsuranceClaim,'min="0"');
+    h+=yesNoRow('rxOutOfStock','Medication Out of Stock Flagged',w.rxOutOfStock);
     h+=yesNoRow('rxExpiryCheck','Expiry Check Performed',w.rxExpiryCheck);
     h+=yesNoRow('rxSupplierOrder','Supplier / Wholesaler Order Placed',w.rxSupplierOrder);
     h+=yesNoRow('rxDrugInteraction','Drug Interaction Check Flagged',w.rxDrugInteraction);
-    h+=_inp('INSURANCE / CLAIMS PROCESSED','rxInsuranceClaim','number','Count',w.rxInsuranceClaim,'min="0"');
-    h+=_inp('SHIFT TYPE / PHARMACY','rxShiftType','text','Which pharmacy, which shift',w.rxShiftType);
     h+=yesNoRow('rxContinuingEd','Continuing Education / Training Completed',w.rxContinuingEd);
+    h+=_inp('SHIFT TYPE / PHARMACY','rxShiftType','text','Which pharmacy, which shift',w.rxShiftType);
 
   } else if(job==='officeWorker'){
-    h+=_inp('TASK / PROJECT TAGGED','owTaskTag','text','Which task or department',w.owTaskTag);
-    h+=_inp('MEETINGS ATTENDED','owMeetingCount','number','Count',w.owMeetingCount,'min="0"');
+    h+=_repLog('MEETING ATTENDED','owMeeting','Meeting name / dept (optional)');
+    h+=_repLog('TASK COMPLETED','owTaskDone','Task name (optional)');
+    h+=workTimerRowHtml2('work-t1',workPicker1,w.owFocusSeconds||0,'Focus / Deep Work Session','owFocusSeconds');
     h+=yesNoRow('owEmailCleared','Email / Correspondence Handled',w.owEmailCleared);
     h+=yesNoRow('owReportProduced','Report / Document Produced',w.owReportProduced);
-    h+=_inp('DEADLINE (DAYS REMAINING)','owDeadlineDays','number','Days left',w.owDeadlineDays,'min="0"');
-    h+=workTimerRowHtml2('work-t1',workPicker1,w.owFocusSeconds||0,'Focus / Deep Work Session','owFocusSeconds');
     h+=yesNoRow('owCollabTask','Collaboration / Team Task',w.owCollabTask);
     h+=yesNoRow('owPresentationGiven','Presentation Given',w.owPresentationGiven);
     h+=yesNoRow('owOvertime','Overtime Worked',w.owOvertime);
+    h+=_inp('TASK / PROJECT TAGGED','owTaskTag','text','Which task or department',w.owTaskTag);
+    h+=_inp('DEADLINE (DAYS REMAINING)','owDeadlineDays','number','Days left',w.owDeadlineDays,'min="0"');
     h+=_inp('SOFTWARE / TOOL USED','owSoftware','text','Excel, Word, Slack…',w.owSoftware);
 
   } else {
@@ -5019,11 +5086,13 @@ function workExtrasHtml(job, w){
 
 /* ============ MUSIC ============ */
 // Radial week-wheel for Work Consistency.
-// 7 spokes (Mon–Sun, Monday-aligned), each bar split into 3 stacked segments sourced from musicScoreComponents.
-// Outer annotations: check-in hours per day. Empty spokes = no sessions logged that day.
+// 7 spokes (Mon–Sun, Monday-aligned), each bar split into 3 segments: repeatable entries / one-time fields / check-in.
+// Outer annotations: check-in hours per day.
 function workWeekWheelHtml(allDaysArg){
   const f=n=>n.toFixed(2);
   const sin=Math.sin,cos=Math.cos,PI=Math.PI;
+  const _wJob=(DB.profile()||{}).job||null;
+  const _wTarget=WORK_TARGET[_wJob]||20;
 
   // Monday-aligned current week, same convention as Review tab's getWeekDays
   const base=new Date(EDIT_DATE);
@@ -5036,8 +5105,9 @@ function workWeekWheelHtml(allDaysArg){
 
   const dayData=wDates.map(ds=>{
     const md=(ds===EDIT_DATE)?day.music:((allDaysArg[ds]&&allDaysArg[ds].music)||null);
-    if(!md) return {comp:{projectPts:0,minutePts:0,qualityPts:0},checkinSecs:0,hasSess:false};
-    return {comp:musicScoreComponents({music:md}),checkinSecs:md.checkinSeconds||0,hasSess:!!(md.sessions&&md.sessions.length)};
+    if(!md) return {repPts:0,otPts:0,ciPts:0,checkinSecs:0};
+    const bd=musicScoreBreakdown({music:md});
+    return {repPts:bd.repPts,otPts:bd.otPts,ciPts:bd.ciPts,checkinSecs:md.checkinSeconds||0};
   });
 
   const fmtH=s=>{if(!s)return '—';if(s<3600)return Math.round(s/60)+'m';return Math.floor(s/3600)+'h';};
@@ -5050,21 +5120,21 @@ function workWeekWheelHtml(allDaysArg){
   wDates.forEach((ds,i)=>{
     const angDeg=i*360/7;
     const angRad=i*2*PI/7;
-    const {comp,checkinSecs,hasSess}=dayData[i];
-    // Scale component points (0-100 space) to bar-pixel space (0-scale)
-    const pLen=hasSess?(comp.projectPts/100)*scale:0;
-    const mLen=hasSess?(comp.minutePts/100)*scale:0;
-    const qLen=hasSess?(comp.qualityPts/100)*scale:0;
+    const {repPts,otPts,ciPts,checkinSecs}=dayData[i];
+    // Scale score components (0-target space) to bar-pixel space (0-scale)
+    const pLen=Math.min((repPts/_wTarget)*scale, scale);
+    const mLen=Math.min((otPts/_wTarget)*scale, scale-pLen);
+    const qLen=Math.min((ciPts/_wTarget)*scale, scale-pLen-mLen);
 
     // Rotated bar group — rotate(angDeg) turns "pointing up" to the correct spoke direction
     svg+=`<g transform="rotate(${f(angDeg)})">`;
     // Empty track (full bar background)
     svg+=`<rect x="${f(-barW/2)}" y="${-maxR}" width="${barW}" height="${scale}" rx="3" fill="var(--track-bg)" opacity="0.45"/>`;
-    // Segment A: project diversity (inner, green)
+    // Segment A: repeatable log entries (inner, green)
     if(pLen>0.5) svg+=`<rect x="${f(-barW/2)}" y="${f(-hubR-pLen)}" width="${barW}" height="${f(pLen)}" fill="var(--green)"/>`;
-    // Segment B: time invested (middle, music accent)
+    // Segment B: one-time fields (middle, music accent)
     if(mLen>0.5) svg+=`<rect x="${f(-barW/2)}" y="${f(-hubR-pLen-mLen)}" width="${barW}" height="${f(mLen)}" fill="var(--music)"/>`;
-    // Segment C: quality rated (tip, amber) — rounded outer corner
+    // Segment C: check-in (tip, amber) — rounded outer corner
     if(qLen>0.5) svg+=`<rect x="${f(-barW/2)}" y="${f(-hubR-pLen-mLen-qLen)}" width="${barW}" height="${f(qLen)}" rx="3" fill="var(--amber)"/>`;
     svg+=`</g>`;
 
@@ -5090,9 +5160,9 @@ function workWeekWheelHtml(allDaysArg){
 
   const dateHtml=`<div style="text-align:center;font-family:var(--mono);font-size:8px;color:var(--mute);margin-top:4px;letter-spacing:0.05em">${weekLabel.toUpperCase()}</div>`;
   const legend=`<div style="display:flex;justify-content:center;gap:16px;margin-top:8px">`+
-    `<div style="display:flex;align-items:center;gap:5px"><span style="width:8px;height:8px;border-radius:2px;background:var(--green);flex-shrink:0;display:inline-block"></span><span style="font-family:var(--mono);font-size:8px;color:var(--mute)">Diversity</span></div>`+
-    `<div style="display:flex;align-items:center;gap:5px"><span style="width:8px;height:8px;border-radius:2px;background:var(--music);flex-shrink:0;display:inline-block"></span><span style="font-family:var(--mono);font-size:8px;color:var(--mute)">Time</span></div>`+
-    `<div style="display:flex;align-items:center;gap:5px"><span style="width:8px;height:8px;border-radius:2px;background:var(--amber);flex-shrink:0;display:inline-block"></span><span style="font-family:var(--mono);font-size:8px;color:var(--mute)">Quality</span></div>`+
+    `<div style="display:flex;align-items:center;gap:5px"><span style="width:8px;height:8px;border-radius:2px;background:var(--green);flex-shrink:0;display:inline-block"></span><span style="font-family:var(--mono);font-size:8px;color:var(--mute)">Activity</span></div>`+
+    `<div style="display:flex;align-items:center;gap:5px"><span style="width:8px;height:8px;border-radius:2px;background:var(--music);flex-shrink:0;display:inline-block"></span><span style="font-family:var(--mono);font-size:8px;color:var(--mute)">Fields</span></div>`+
+    `<div style="display:flex;align-items:center;gap:5px"><span style="width:8px;height:8px;border-radius:2px;background:var(--amber);flex-shrink:0;display:inline-block"></span><span style="font-family:var(--mono);font-size:8px;color:var(--mute)">Check-in</span></div>`+
     `</div>`;
   return `<div class="card" style="padding-bottom:10px">${svg}${dateHtml}${legend}</div>`;
 }
@@ -5425,63 +5495,63 @@ function renderMusic(){
   html += sectionLabel('DONE / HISTORY');
   html += '<div class="card">'+(done.length ? done.map(p=>'<div class="checkline"><span class="box" style="color:var(--green)">&#9632;</span>'+escHtml(p.name)+'</div>').join('') : '<div style="font-size:11px;color:var(--mute)">Nothing finished yet.</div>')+'</div>';
 
-  html += sectionLabel('TODAY','var(--music)');
-  const mussSess = day.music.sessions || [];
-  html += '<div class="card">';
-  if(mussSess.length){
-    mussSess.forEach((ms,msi)=>{
-      const allProjs = DB.projects();
-      const mpn = ms.workedOn==='instrumentals'?'General / No project':ms.workedOn?(allProjs.find(p=>p.id===ms.workedOn)||{}).name||ms.workedOn:'—';
-      const meta=[];
-      if(ms.minutes!=null) meta.push(ms.minutes+' min');
-      if(ms.quality!=null) meta.push('★'+ms.quality);
-      if(ms.startTime&&ms.endTime) meta.push(ms.startTime+' → '+ms.endTime);
-      html += '<div class="checkline" style="align-items:flex-start;gap:8px;padding:6px 0">'
-        +'<div style="flex:1"><div style="font-size:13px;font-weight:600;color:var(--text)">'+escHtml(mpn)+'</div>'
-        +(meta.length?'<div style="font-size:11px;color:var(--mute);margin-top:2px;font-family:var(--mono)">'+meta.join(' · ')+'</div>':'')
-        +'</div>'
-        +'<button data-del-sess="'+msi+'" style="background:none;border:none;color:var(--mute);font-size:20px;cursor:pointer;padding:0 2px;line-height:1" aria-label="Remove session">×</button>'
+  // Sessions section — only for 5 jobs that keep it
+  if(SESSIONS_JOBS.includes(_job)){
+    html += sectionLabel('TODAY','var(--music)');
+    const mussSess = day.music.sessions || [];
+    html += '<div class="card">';
+    if(mussSess.length){
+      mussSess.forEach((ms,msi)=>{
+        const allProjs = DB.projects();
+        const mpn = ms.workedOn==='instrumentals'?'General / No project':ms.workedOn?(allProjs.find(p=>p.id===ms.workedOn)||{}).name||ms.workedOn:'—';
+        const meta=[];
+        if(ms.minutes!=null) meta.push(ms.minutes+' min');
+        if(ms.quality!=null) meta.push('★'+ms.quality);
+        if(ms.startTime&&ms.endTime) meta.push(ms.startTime+' → '+ms.endTime);
+        html += '<div class="checkline" style="align-items:flex-start;gap:8px;padding:6px 0">'
+          +'<div style="flex:1"><div style="font-size:13px;font-weight:600;color:var(--text)">'+escHtml(mpn)+'</div>'
+          +(meta.length?'<div style="font-size:11px;color:var(--mute);margin-top:2px;font-family:var(--mono)">'+meta.join(' · ')+'</div>':'')
+          +'</div>'
+          +'<button data-del-sess="'+msi+'" style="background:none;border:none;color:var(--mute);font-size:20px;cursor:pointer;padding:0 2px;line-height:1" aria-label="Remove session">×</button>'
+          +'</div>';
+      });
+      html += '<div style="height:4px"></div>';
+    } else {
+      html += '<div style="font-size:11px;color:var(--mute);margin-bottom:8px">No sessions logged yet.</div>';
+    }
+    html += '<button class="btn-ghost" id="add-session-btn" style="border-color:var(--music);color:var(--music);width:100%;margin-top:2px">+ Add session</button>';
+    if(musicDraftActive){
+      const drvMins=(musicDraft.startTime&&musicDraft.endTime)?deriveMinutes(musicDraft.startTime,musicDraft.endTime):null;
+      const showMins=(musicDraft.minutesSource==='manual'&&musicDraft.minutes!=null)?musicDraft.minutes:(drvMins!=null?drvMins:(musicDraft.minutes!=null?musicDraft.minutes:''));
+      html += '<div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">';
+      html += '<label style="font-family:var(--mono);font-size:9px;color:var(--mute)">WORKED ON</label>';
+      html += '<select class="input" id="draft-worked-on"><option value="">Select</option>';
+      active.forEach(p=>{ html += '<option value="'+p.id+'" '+(musicDraft.workedOn===p.id?'selected':'')+'>'+p.name+'</option>'; });
+      html += '<option value="instrumentals" '+(musicDraft.workedOn==='instrumentals'?'selected':'')+'>General / No project</option></select>';
+      html += '<label style="font-family:var(--mono);font-size:9px;color:var(--mute);margin-top:8px;display:block">TIME (OPTIONAL)</label>';
+      html += '<div style="display:flex;gap:8px;margin-top:4px">'
+        +'<button class="btn-ghost" id="draft-start" style="flex:1;font-family:var(--mono);font-size:12px;padding:8px">Start: '+(musicDraft.startTime||'--:--')+'</button>'
+        +'<button class="btn-ghost" id="draft-end" style="flex:1;font-family:var(--mono);font-size:12px;padding:8px">End: '+(musicDraft.endTime||'--:--')+'</button>'
         +'</div>';
-    });
-    html += '<div style="height:4px"></div>';
-  } else {
-    html += '<div style="font-size:11px;color:var(--mute);margin-bottom:8px">No sessions logged yet.</div>';
-  }
-  html += '<button class="btn-ghost" id="add-session-btn" style="border-color:var(--music);color:var(--music);width:100%;margin-top:2px">+ Add session</button>';
-  if(musicDraftActive){
-    const drvMins=(musicDraft.startTime&&musicDraft.endTime)?deriveMinutes(musicDraft.startTime,musicDraft.endTime):null;
-    const showMins=(musicDraft.minutesSource==='manual'&&musicDraft.minutes!=null)?musicDraft.minutes:(drvMins!=null?drvMins:(musicDraft.minutes!=null?musicDraft.minutes:''));
-    html += '<div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">';
-    html += '<label style="font-family:var(--mono);font-size:9px;color:var(--mute)">WORKED ON</label>';
-    html += '<select class="input" id="draft-worked-on"><option value="">Select</option>';
-    active.forEach(p=>{ html += '<option value="'+p.id+'" '+(musicDraft.workedOn===p.id?'selected':'')+'>'+p.name+'</option>'; });
-    html += '<option value="instrumentals" '+(musicDraft.workedOn==='instrumentals'?'selected':'')+'>General / No project</option></select>';
-    html += '<label style="font-family:var(--mono);font-size:9px;color:var(--mute);margin-top:8px;display:block">TIME (OPTIONAL)</label>';
-    html += '<div style="display:flex;gap:8px;margin-top:4px">'
-      +'<button class="btn-ghost" id="draft-start" style="flex:1;font-family:var(--mono);font-size:12px;padding:8px">Start: '+(musicDraft.startTime||'--:--')+'</button>'
-      +'<button class="btn-ghost" id="draft-end" style="flex:1;font-family:var(--mono);font-size:12px;padding:8px">End: '+(musicDraft.endTime||'--:--')+'</button>'
-      +'</div>';
-    html += '<label style="font-family:var(--mono);font-size:9px;color:var(--mute);margin-top:8px;display:block">DURATION (MINUTES)</label>';
-    html += '<input type="number" class="input" id="draft-mins" value="'+showMins+'" placeholder="How long" min="0">';
-    html += '<label style="font-family:var(--mono);font-size:9px;color:var(--mute);margin-top:8px;display:block">QUALITY</label>';
-    html += '<div class="btn-group">'+[1,2,3,4,5].map(v=>'<button class="opt-btn sq-btn draft-sq'+(musicDraft.quality===v?' sel':'')+'" data-dsq="'+v+'">'+v+'</button>').join('')+'</div>';
-    html += '<div style="display:flex;gap:8px;margin-top:12px">'
-      +'<button class="btn-cancel" id="draft-cancel" style="flex:1;padding:10px;border-radius:16px;font-family:var(--sans);font-weight:700;font-size:13px">Cancel</button>'
-      +'<button class="btn-primary" id="draft-save" style="flex:1;padding:10px;border-radius:16px;font-family:var(--sans);font-weight:700;font-size:13px">Save Session</button>'
-      +'</div>';
+      html += '<label style="font-family:var(--mono);font-size:9px;color:var(--mute);margin-top:8px;display:block">DURATION (MINUTES)</label>';
+      html += '<input type="number" class="input" id="draft-mins" value="'+showMins+'" placeholder="How long" min="0">';
+      html += '<label style="font-family:var(--mono);font-size:9px;color:var(--mute);margin-top:8px;display:block">QUALITY</label>';
+      html += '<div class="btn-group">'+[1,2,3,4,5].map(v=>'<button class="opt-btn sq-btn draft-sq'+(musicDraft.quality===v?' sel':'')+'" data-dsq="'+v+'">'+v+'</button>').join('')+'</div>';
+      html += '<div style="display:flex;gap:8px;margin-top:12px">'
+        +'<button class="btn-cancel" id="draft-cancel" style="flex:1;padding:10px;border-radius:16px;font-family:var(--sans);font-weight:700;font-size:13px">Cancel</button>'
+        +'<button class="btn-primary" id="draft-save" style="flex:1;padding:10px;border-radius:16px;font-family:var(--sans);font-weight:700;font-size:13px">Save Session</button>'
+        +'</div>';
+      html += '</div>';
+    }
     html += '</div>';
   }
-  html += '</div>';
 
   html += sectionLabel('NOTES', 'var(--music)');
   html += '<div class="card">'+'<textarea class="input textarea" id="music-notes" placeholder="Notes for today">'+(day.music.notes||'')+'</textarea></div>';
   html += sectionLabel('MONTH TO DATE');
   const avg = monthAvg(musicScore, EDIT_DATE.slice(0,7));
   const allDaysMusic = DB.allDays();
-  const monthPrefixMusic = EDIT_DATE.slice(0,7);
-  const instruCount = Object.keys(allDaysMusic).filter(k=>k.startsWith(monthPrefixMusic) && allDaysMusic[k].music && (allDaysMusic[k].music.sessions||[]).some(s=>s.workedOn==='instrumentals')).length;
-  html += '<div class="card">'+progressRow('Session logging rate', avg, avg+'%', 'var(--music)')+
-    '<div style="display:flex;justify-content:space-between;padding-top:4px;font-size:11px;"><span>General sessions</span><span style="font-family:var(--mono);color:var(--music)">'+instruCount+' this month</span></div></div>';
+  html += '<div class="card">'+progressRow('Work score avg.', avg, avg+'%', 'var(--music)')+'</div>';
 
   html += sectionLabel('WORK CONSISTENCY — THIS WEEK','var(--music)');
   html += workWeekWheelHtml(allDaysMusic);
@@ -5617,6 +5687,29 @@ function renderMusic(){
       renderMusic();
     });
   }
+  // RepLog: log button
+  s.querySelectorAll('.rep-log-btn').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      const key=btn.dataset.repKey;
+      const noteEl=s.querySelector('.rep-note-input[data-rep-key="'+key+'"]');
+      const note=noteEl?noteEl.value.trim():'';
+      if(!day.music.repLogs) day.music.repLogs={};
+      if(!day.music.repLogs[key]) day.music.repLogs[key]=[];
+      day.music.repLogs[key].push({note});
+      renderMusic();
+    });
+  });
+  // RepLog: delete button
+  s.querySelectorAll('[data-del-rep-key]').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      const key=btn.dataset.delRepKey;
+      const idx=parseInt(btn.dataset.delRepIdx);
+      if(day.music.repLogs&&day.music.repLogs[key]){
+        day.music.repLogs[key].splice(idx,1);
+      }
+      renderMusic();
+    });
+  });
   // Save day
   document.getElementById('save-music').addEventListener('click',()=>{
     const notesEl=document.getElementById('music-notes');
@@ -6966,22 +7059,20 @@ function renderReview(){
   html += sectionLabel('WORK THIS WEEK','var(--music)');
   html += '<div class="card">';
   if(mDays.length){
-    let _mp=0,_mm=0,_mq=0;
-    mDays.forEach(d=>{const c=musicScoreComponents(d.rec);_mp+=c.projectPts;_mm+=c.minutePts;_mq+=c.qualityPts;});
-    const avgProjPts=_mp/mDays.length,avgMinPts=_mm/mDays.length,avgQualPts=_mq/mDays.length;
-    html+=progressRow('Projects',Math.round(avgProjPts/40*100),Math.round(avgProjPts)+'/40','var(--music)');
-    html+=progressRow('Minutes',Math.round(avgMinPts/40*100),Math.round(avgMinPts)+'/40','var(--music)');
-    html+=progressRow('Quality',Math.round(avgQualPts/20*100),Math.round(avgQualPts)+'/20','var(--music)');
+    let _totalScore=0,_repSum=0,_otSum=0,_ciSum=0;
+    mDays.forEach(d=>{
+      const bd=musicScoreBreakdown(d.rec);
+      _totalScore+=musicScore(d.rec);
+      _repSum+=bd.repPts;_otSum+=bd.otPts;_ciSum+=bd.ciPts;
+    });
+    const n=mDays.length;
+    const avgScore=Math.round(_totalScore/n);
+    html+=progressRow('Avg work score',avgScore,avgScore+'%','var(--music)');
+    html+=progressRow('Avg activity entries',Math.min(100,Math.round(_repSum/n*5)),Math.round(_repSum/n*10)/10+' entries','var(--music)');
+    html+=progressRow('Avg one-time fields',Math.min(100,Math.round(_otSum/n*5)),Math.round(_otSum/n*10)/10+' fields','var(--music)');
+    html+=progressRow('Check-in days',Math.round(_ciSum/n*100),_ciSum+'/'+n+' days','var(--music)');
   }
-  const sessionCount = mDays.filter(d=>(d.rec.music.sessions||[]).length>0).length;
-  const totalMins = mDays.reduce((a,d)=>a+(d.rec.music.sessions||[]).reduce((b,s)=>b+(s.minutes||0),0),0);
-  const projIds = [...new Set(mDays.flatMap(d=>(d.rec.music.sessions||[]).map(s=>s.workedOn).filter(w=>w&&w!=='instrumentals')))];
-  const projNames = projIds.map(id=>{const p=DB.projects().find(x=>x.id===id);return p?p.name:id;});
-  const instrCount = mDays.filter(d=>(d.rec.music.sessions||[]).some(s=>s.workedOn==='instrumentals')).length;
-  html += rr('Sessions', sessionCount+' days','var(--music)');
-  html += rr('Total studio time', totalMins>0?totalMins+' min':'--','var(--music)');
-  html += rr('Projects touched', projNames.length?projNames.join(', '):'--','var(--music)');
-  html += rr('Instrumentals sessions', instrCount+' days','var(--music)');
+  html += rr('Days with work data', mDays.length+' / 7','var(--music)');
   html += '</div>';
 
   // ─ FINANCE ─
@@ -7040,7 +7131,7 @@ function renderReview(){
   // ─ BEST / WORST DAY ─
   if(wWithData.length){
     html += sectionLabel('BEST / WORST DAY','var(--home)');
-    const scored = wWithData.map(d=>({str:d.str,score:dayScore(d.rec),date:d.date}));
+    const scored = wWithData.map(d=>({str:d.str,score:dayScore(d.rec,d.str),date:d.date}));
     const best = scored.reduce((a,b)=>b.score>a.score?b:a);
     const worst = scored.reduce((a,b)=>b.score<a.score?b:a);
     html += '<div class="grid2">';
